@@ -120,9 +120,30 @@ spec:
                   cp {{ $bootstrapSoulPath | quote }} {{ printf "%s/SOUL.md" $mountPath | quote }}
                 fi
               fi
+              # Write secret env vars into .env so helm upgrades take effect
+              {{- range $key, $value := .Values.secrets }}
+              {{- if and (ne $key "existingSecret") (ne $key "annotations") (ne (printf "%v" $value) "") }}
+              sed -i '/^{{ $key }}=/d' {{ printf "%s/.env" $mountPath | quote }} 2>/dev/null || true
+              echo "{{ $key }}=$(printenv {{ $key }})" >> {{ printf "%s/.env" $mountPath | quote }}
+              {{- end }}
+              {{- end }}
           env:
             - name: HERMES_HOME
               value: {{ $mountPath | quote }}
+          {{- if or .Values.externalSecret.enabled .Values.secrets.existingSecret .Values.extraEnvFrom $hasInlineSecretValues }}
+          envFrom:
+            {{- if or .Values.externalSecret.enabled .Values.secrets.existingSecret }}
+            - secretRef:
+                name: {{ include "hermes-agent.secretName" . }}
+            {{- else }}
+            - secretRef:
+                name: {{ include "hermes-agent.secretName" . }}
+                optional: true
+            {{- end }}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: {{ $mountPath }}
