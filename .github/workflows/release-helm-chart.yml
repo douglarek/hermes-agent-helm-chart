@@ -1,0 +1,120 @@
+name: Release Helm Chart
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Chart.yaml
+      - values.yaml
+      - values.schema.json
+      - templates/**
+      - crds/**
+      - README.md
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Chart.yaml
+      - values.yaml
+      - values.schema.json
+      - templates/**
+      - crds/**
+      - README.md
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Chart Changes
+        id: changes
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+            if [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+              base="HEAD~1"
+            fi
+          fi
+
+          changed_files="$(git diff --name-only "$base" HEAD -- Chart.yaml values.yaml values.schema.json templates crds README.md 2>/dev/null || true)"
+          chart_yaml_changed=false
+          has_other_changes=false
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [ "$file" = "Chart.yaml" ]; then
+              chart_yaml_changed=true
+            else
+              has_other_changes=true
+            fi
+          done <<< "$changed_files"
+
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "chart_yaml_changed=$chart_yaml_changed" >> "$GITHUB_OUTPUT"
+          echo "has_other_changes=$has_other_changes" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Version Bump
+        if: steps.changes.outputs.chart_yaml_changed == 'true'
+        shell: bash
+        run: |
+          current_version="$(awk -F': *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }' Chart.yaml)"
+          prev_version="$(git show "${{ steps.changes.outputs.base }}:Chart.yaml" 2>/dev/null | awk -F': *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }')"
+          prev_version="${prev_version:-0.0.0}"
+
+          echo "Previous version: $prev_version"
+          echo "Current version: $current_version"
+
+          if [ "$current_version" = "$prev_version" ]; then
+            echo "ERROR: Chart.yaml changed but version is still $current_version"
+            exit 1
+          fi
+
+          if [ "$(printf '%s\n%s\n' "$prev_version" "$current_version" | sort -V | head -n1)" != "$prev_version" ]; then
+            echo "ERROR: Version $current_version is not greater than $prev_version"
+            exit 1
+          fi
+
+      - name: Require Version Bump
+        if: steps.changes.outputs.chart_yaml_changed == 'false' && steps.changes.outputs.has_other_changes == 'true'
+        run: |
+          echo "ERROR: Chart files changed but Chart.yaml version was not bumped"
+          exit 1
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.2
+
+      - name: Lint Chart
+        run: helm lint .
+
+      - name: Login to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package and Push Chart
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          chart_name="$(awk -F': *' '$1 == "name" { gsub(/"/, "", $2); print $2; exit }' Chart.yaml)"
+          version="$(awk -F': *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }' Chart.yaml)"
+          oci_registry="oci://ghcr.io/${{ github.repository }}"
+
+          helm package . --destination .
+          helm push "${chart_name}-${version}.tgz" "$oci_registry"
