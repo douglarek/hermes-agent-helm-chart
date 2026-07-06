@@ -6,6 +6,7 @@ on:
       - main
       - dev
     paths:
+      - .github/workflows/release-helm-chart.yml
       - Chart.yaml
       - values.yaml
       - values.schema.json
@@ -17,6 +18,7 @@ on:
       - main
       - dev
     paths:
+      - .github/workflows/release-helm-chart.yml
       - Chart.yaml
       - values.yaml
       - values.schema.json
